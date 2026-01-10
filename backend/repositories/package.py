@@ -99,3 +99,22 @@ class PackageRepository(BaseRepository[Package]):
             skip=skip,
             limit=limit,
         )
+
+    def search_by_name(self, search_term: str, skip: int = 0, limit: int = 100) -> List[Package]:
+        """
+        Search packages by name (case-insensitive).
+
+        Args:
+            search_term: Search term to match against package names
+            skip: Number to skip
+            limit: Maximum results
+
+        Returns:
+            List of matching packages
+        """
+        return self.find_many(
+            {"name": {"$regex": search_term, "$options": "i"}},
+            skip=skip,
+            limit=limit,
+            sort=[("name", 1)],
+        )

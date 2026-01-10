@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from pydantic import BaseModel, Field
 
 
@@ -17,7 +17,14 @@ class FetchDepsRequest(BaseModel):
 
 
 class FetchDepsResponse(BaseModel):
-    """Response with npm dependency tree."""
+    """Response for deps fetch - returns job ID for tracking (non-blocking)."""
+    job_id: str
+    status: str
+    message: str
+
+
+class DepsResult(BaseModel):
+    """Result schema for completed deps fetch job."""
     name: Optional[str] = Field(None, description="Package name")
     version: Optional[str] = Field(None, description="Package version")
     description: Optional[str] = Field(None, description="Package description")
@@ -26,3 +33,16 @@ class FetchDepsResponse(BaseModel):
     optionalDependencies: Dict[str, DependencyInfo] = Field(default_factory=dict)
     peerDependencies: Dict[str, DependencyInfo] = Field(default_factory=dict)
     error: Optional[str] = Field(None, description="Error message if fetch failed")
+
+
+class JobStatusResponse(BaseModel):
+    """Response schema for job status."""
+    job_id: str
+    type: str
+    status: str
+    created_at: str
+    started_at: Optional[str]
+    completed_at: Optional[str]
+    progress: Optional[Dict[str, Any]]
+    result: Optional[Any]
+    error: Optional[str]

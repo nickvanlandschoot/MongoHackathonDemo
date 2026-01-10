@@ -22,8 +22,10 @@ from repositories import (
 )
 from services.npm_client import NpmRegistryClient, NpmVersionInfo
 from services.github_client import GitHubApiClient
-from services.tarball_analyzer import TarballAnalyzer, TarballAnalysisResult
+from services.tarball_extractor import TarballExtractor, TarballContent
 from services.risk_scorer import RiskScorer
+from services.delta_service import DeltaService
+from services.package_service import get_or_create_package_with_enrichment, crawl_package_maintainers
 
 
 class WatcherService:
@@ -58,8 +60,9 @@ class WatcherService:
         # Clients and analyzers
         self.npm_client = NpmRegistryClient()
         self.github_client = GitHubApiClient()
-        self.tarball_analyzer = TarballAnalyzer()
+        self.tarball_extractor = TarballExtractor()
         self.risk_scorer = RiskScorer()
+        self.delta_service = DeltaService(database)
 
     async def poll_all_packages(self) -> dict:
         """
@@ -70,37 +73,29 @@ class WatcherService:
         """
         print("[watcher] Starting poll cycle for all packages")
 
-        # Get unique package names from dependency_trees collection
-        dependency_trees = self.db.dependency_trees.find({}, {"name": 1})
-        unique_packages = set()
-        for doc in dependency_trees:
-            if "name" in doc:
-                unique_packages.add(doc["name"])
+        # Get all packages from packages collection
+        all_packages = self.package_repo.find_many({})
 
-        if not unique_packages:
-            print("[watcher] No packages to poll from dependency_trees")
+        if not all_packages:
+            print("[watcher] No packages to poll")
             return {"packages_checked": 0, "new_releases": 0, "alerts_created": 0}
 
-        print(f"[watcher] Found {len(unique_packages)} unique packages in dependency_trees")
+        print(f"[watcher] Found {len(all_packages)} packages to poll")
 
-        # Get or create Package records for each
+        # Enrich any packages missing metadata (from old dependency_trees flow)
         packages = []
-        for pkg_name in unique_packages:
-            pkg = self.package_repo.find_by_name(pkg_name)
-            if not pkg:
-                # Create Package record for this dependency
-                pkg = Package(
-                    name=pkg_name,
-                    registry="npm",
-                    analysis=Analysis(
-                        summary=f"Package discovered from dependency scan",
-                        reasons=["Auto-discovered from dependency tree"],
-                        confidence=1.0,
-                        source="rule",
-                    ),
+        for pkg in all_packages:
+            # If package has no repo_url, try to enrich it
+            if not pkg.repo_url:
+                print(f"[watcher] Enriching package metadata for {pkg.name}")
+                enriched = await get_or_create_package_with_enrichment(
+                    package_name=pkg.name,
+                    npm_client=self.npm_client,
+                    repo=self.package_repo,
                 )
-                pkg = self.package_repo.create(pkg)
-                print(f"[watcher] Created Package record for {pkg_name}")
+                if enriched:
+                    pkg = enriched
+
             packages.append(pkg)
 
         if not packages:
@@ -182,6 +177,15 @@ class WatcherService:
                     f"[watcher] ERROR: Error processing {package.name}@{version_info.version}: {e}"
                 )
 
+        # If we processed any releases, crawl maintainers to ensure we have the full list
+        if releases_created > 0 and not package.scan_state.maintainers_crawled:
+            maintainer_count = await crawl_package_maintainers(
+                package.name,
+                self.npm_client,
+                self.package_repo,
+            )
+            print(f"[watcher] Crawled {maintainer_count} maintainers for {package.name}")
+
         return {"releases": releases_created, "alerts": alerts_created}
 
     async def _process_release(
@@ -197,6 +201,14 @@ class WatcherService:
         Returns:
             Dict with processing results
         """
+        # Ensure package has an ID (required for all operations below)
+        if not package.id:
+            print(f"[watcher] ERROR: Package has no ID: {package.name}")
+            return {"alert_created": False, "delta_created": False, "alert_from_delta": False}
+
+        # After this point, package.id is guaranteed to be non-None
+        package_id = package.id  # Type narrowing for clarity
+
         print(f"[watcher] Processing release: {package.name}@{version_info.version}")
 
         # 1. Resolve maintainer identity
@@ -227,15 +239,14 @@ class WatcherService:
         )
 
         if tarball_bytes:
-            tarball_analysis = self.tarball_analyzer.analyze(tarball_bytes)
+            tarball_analysis = await asyncio.to_thread(
+                self.tarball_extractor.extract, tarball_bytes
+            )
         else:
-            tarball_analysis = TarballAnalysisResult(
+            tarball_analysis = TarballContent(
                 files=[],
-                suspicious_files=[],
-                suspicious_content_matches={},
                 package_json=None,
                 scripts={},
-                risk_indicators=["Failed to download tarball"],
             )
 
         # 4. Calculate risk score
@@ -248,9 +259,9 @@ class WatcherService:
 
         # 5. Create PackageRelease record
         release = PackageRelease(
-            package_id=package.id,
+            package_id=package_id,
             version=version_info.version,
-            previous_version=self._get_previous_version(package.id),
+            previous_version=self._get_previous_version(package_id),
             published_by=identity.id if identity else None,
             publish_timestamp=version_info.publish_time,
             tarball_integrity=version_info.integrity,
@@ -266,11 +277,48 @@ class WatcherService:
 
         created_release = self.release_repo.create(release)
 
-        # 6. Create alert if needed
+        # 6. Compute delta if there's a previous version
+        delta_created = False
+        alert_from_delta = False
+
+        if created_release.previous_version:
+            try:
+                delta = await self.delta_service.compute_delta(
+                    package_id,
+                    from_version=created_release.previous_version,
+                    to_version=created_release.version,
+                )
+                if delta:
+                    delta_created = True
+                    print(
+                        f"[watcher] Delta computed: {package.name} "
+                        f"{delta.from_version} -> {delta.to_version} "
+                        f"(risk: {delta.risk_score:.1f})"
+                    )
+
+                    # Create alert if high-risk delta (>= 70)
+                    if delta.risk_score >= 70 and delta.id:
+                        alert = RiskAlert(
+                            package_id=package_id,
+                            identity_id=identity.id if identity else None,
+                            release_id=created_release.id,
+                            delta_id=delta.id,
+                            reason=f"High-risk version delta detected: {delta.analysis.summary}",
+                            severity=delta.risk_score,
+                            status="open",
+                            analysis=delta.analysis,
+                        )
+                        self.alert_repo.create(alert)
+                        alert_from_delta = True
+                        print(f"[watcher] ALERT: High-risk delta alert created")
+            except Exception as e:
+                print(f"[watcher] ERROR: Failed to compute delta: {e}")
+
+        # 7. Create alert if needed (from release risk assessment)
         alert_created = False
         if risk_assessment.should_alert:
             alert = RiskAlert(
-                package_id=package.id,
+                package_id=package_id,
                 identity_id=identity.id if identity else None,
                 release_id=created_release.id,
                 reason=risk_assessment.alert_reason or "High risk release detected",
@@ -290,10 +338,14 @@ class WatcherService:
                 f"{risk_assessment.alert_reason}"
             )
 
-        # 7. Update package last_scanned
-        self.package_repo.update(package.id, {"last_scanned": datetime.now(timezone.utc)})
+        # 8. Update package last_scanned
+        self.package_repo.update(package_id, {"last_scanned": datetime.now(timezone.utc)})
 
-        return {"alert_created": alert_created}
+        return {
+            "alert_created": alert_created,
+            "delta_created": delta_created,
+            "alert_from_delta": alert_from_delta,
+        }
 
     def _create_identity(self, npm_handle: str) -> Identity:
         """Create a new Identity for a first-time maintainer."""

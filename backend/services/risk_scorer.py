@@ -7,7 +7,7 @@ from typing import Optional, List
 from dataclasses import dataclass
 
 from services.github_client import GitHubUserInfo
-from services.tarball_analyzer import TarballAnalysisResult
+from services.tarball_extractor import TarballContent
 
 
 @dataclass
@@ -45,7 +45,7 @@ class RiskScorer:
         *,
         is_first_time_maintainer: bool,
         github_info: Optional[GitHubUserInfo],
-        tarball_analysis: TarballAnalysisResult,
+        tarball_analysis: TarballContent,
         maintainer_handle: Optional[str] = None,
     ) -> RiskAssessment:
         """
@@ -99,23 +99,8 @@ class RiskScorer:
             score += 10
             reasons.append("Contains install scripts")
 
-        if tarball_analysis.suspicious_files:
-            score += 20
-            reasons.append(
-                f"Suspicious filenames: {', '.join(tarball_analysis.suspicious_files[:3])}"
-            )
-
-        # Score for suspicious content patterns
-        if tarball_analysis.suspicious_content_matches:
-            unique_patterns = set()
-            for matches in tarball_analysis.suspicious_content_matches.values():
-                unique_patterns.update(matches)
-
-            pattern_score = min(len(unique_patterns) * 10, 50)
-            score += pattern_score
-            reasons.append(
-                f"Suspicious code patterns: {', '.join(list(unique_patterns)[:3])}"
-            )
+        # TODO: Suspicious file and content analysis will be done by AI agent
+        # Removed suspicious_files and suspicious_content_matches checks (not available in TarballContent)
 
         # Cap score at 100
         score = min(score, 100.0)
@@ -125,9 +110,8 @@ class RiskScorer:
         alert_reason = None
 
         if should_alert:
-            if is_first_time_maintainer and tarball_analysis.suspicious_content_matches:
-                alert_reason = "New maintainer with suspicious code patterns"
-            elif is_first_time_maintainer and tarball_analysis.has_install_scripts:
+            # TODO: Suspicious pattern detection will be done by AI agent
+            if is_first_time_maintainer and tarball_analysis.has_install_scripts:
                 alert_reason = "New maintainer added install scripts"
             elif github_info and github_info.is_new_account:
                 alert_reason = "Publisher has newly created GitHub account"

@@ -1,19 +1,18 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-
-function HomePage() {
-  return (
-    <div className="min-h-screen bg-neutral-950">
-    </div>
-  )
-}
+import { PackagesCacheProvider } from '@/lib/cache'
+import { PackageList } from '@/pages/PackageList'
+import { PackageDetail } from '@/pages/PackageDetail'
 
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<HomePage />} />
-      </Routes>
-    </BrowserRouter>
+    <PackagesCacheProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<PackageList />} />
+          <Route path="/packages/:name" element={<PackageDetail />} />
+        </Routes>
+      </BrowserRouter>
+    </PackagesCacheProvider>
   )
 }
 
