@@ -25,7 +25,7 @@ class PyObjectId(ObjectId):
         return ObjectId(v)
 
     @classmethod
-    def __get_pydantic_json_schema__(cls, _handler):
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
         return {"type": "string"}
 
 

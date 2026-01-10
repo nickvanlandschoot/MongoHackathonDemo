@@ -5,10 +5,11 @@ Database connection management for MongoDB.
 from functools import lru_cache
 from typing import Optional
 
+import certifi
 from pymongo import MongoClient
 from pymongo.database import Database
 
-from env import MONGODB_URI
+from env import MONGODB_URI, MONGODB_DATABASE_NAME
 
 
 class DatabaseManager:
@@ -26,20 +27,41 @@ class DatabaseManager:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def connect(self, uri: Optional[str] = None) -> None:
+    def connect(self, uri: Optional[str] = None, database_name: Optional[str] = None) -> None:
         """
         Establish connection to MongoDB.
 
         Args:
             uri: MongoDB connection URI. Uses MONGODB_URI from env if not provided.
+            database_name: Database name. Uses MONGODB_DATABASE_NAME from env if not provided.
         """
         if self._client is None:
             connection_uri = uri or MONGODB_URI
             if not connection_uri:
                 raise ValueError("MongoDB URI not provided and MONGODB_URI not set")
 
-            self._client = MongoClient(connection_uri)
-            self._database = self._client.get_default_database()
+            db_name = database_name or MONGODB_DATABASE_NAME
+            if not db_name:
+                raise ValueError("Database name not provided and MONGODB_DATABASE_NAME not set")
+
+            # Ensure connection string has required parameters for Atlas
+            # mongodb+srv:// automatically uses TLS/SSL
+            if "mongodb+srv://" in connection_uri:
+                # Add retryWrites and w=majority if not present
+                if "retryWrites" not in connection_uri:
+                    separator = "&" if "?" in connection_uri else "?"
+                    connection_uri = f"{connection_uri}{separator}retryWrites=true&w=majority"
+            
+            # Configure MongoDB client with connection options
+            # Use certifi for SSL certificate validation (helps on macOS)
+            self._client = MongoClient(
+                connection_uri,
+                tlsCAFile=certifi.where(),
+                serverSelectionTimeoutMS=30000,
+                connectTimeoutMS=30000,
+                socketTimeoutMS=30000,
+            )
+            self._database = self._client[db_name]
 
     def disconnect(self) -> None:
         """Close MongoDB connection."""

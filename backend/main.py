@@ -4,6 +4,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import env
+from api.deps.router import router as deps_router
+from api.watcher.router import router as watcher_router, init_scheduler, get_scheduler_instance
 from database import DatabaseManager, get_database, get_database_manager
 from models import Analysis, Package
 from repositories import PackageRepository
@@ -13,6 +15,10 @@ app = FastAPI(
     description="Supply chain security monitoring API",
     version="1.0.0",
 )
+
+# Include routers
+app.include_router(deps_router)
+app.include_router(watcher_router)
 
 # Initialize database manager
 db_manager = get_database_manager()
@@ -34,19 +40,31 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database connection on startup."""
+    """Initialize database connection and watcher scheduler on startup."""
     try:
         db_manager.connect()
         db_manager.client.admin.command("ping")
         print("MongoDB connection successful")
+
+        # Initialize and start watcher scheduler
+        scheduler = init_scheduler(db_manager.database)
+        scheduler.start(interval_seconds=30)
+        print("Watcher scheduler started (30s interval)")
+
     except Exception as e:
-        print(f"MongoDB connection failed: {e}")
+        print(f"Startup failed: {e}")
         raise
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Close database connection on shutdown."""
+    """Close database connection and stop scheduler on shutdown."""
+    # Stop watcher scheduler if running
+    scheduler = get_scheduler_instance()
+    if scheduler and scheduler._is_running:
+        scheduler.stop()
+        print("Watcher scheduler stopped")
+
     db_manager.disconnect()
     print("MongoDB connection closed")
 
