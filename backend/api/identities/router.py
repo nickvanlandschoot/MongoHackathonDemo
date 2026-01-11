@@ -34,9 +34,9 @@ async def list_identities(
     Useful for frontend to display all known maintainers and their GitHub info.
     """
     if kind:
-        identities = repo.find_many({"kind": kind}, skip=skip, limit=limit)
+        identities = await repo.find_many({"kind": kind}, skip=skip, limit=limit)
     else:
-        identities = repo.find_many({}, skip=skip, limit=limit)
+        identities = await repo.find_many({}, skip=skip, limit=limit)
 
     return identities
 
@@ -49,7 +49,7 @@ async def get_identity(
     """
     Get specific identity by ID.
     """
-    identity = repo.find_by_id(identity_id)
+    identity = await repo.find_by_id(identity_id)
     if not identity:
         raise HTTPException(status_code=404, detail=f"Identity {identity_id} not found")
 
@@ -67,7 +67,7 @@ async def get_identity_by_handle(
 
     Useful for looking up npm maintainer or GitHub user by username.
     """
-    identity = repo.find_by_handle(handle, kind=kind)
+    identity = await repo.find_by_handle(handle, kind=kind)
     if not identity:
         raise HTTPException(
             status_code=404,

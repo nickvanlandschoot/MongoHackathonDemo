@@ -226,7 +226,7 @@ export function PackageList() {
           )}
 
           {/* Empty State */}
-          {!loading && packages.length === 0 && (
+          {!loading && packages.length === 0 && optimisticPackages.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <p className="text-sm text-neutral-400">
                 {search ? 'No packages match your search' : 'No packages found'}

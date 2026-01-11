@@ -18,7 +18,7 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
     def __init__(self, database: Database):
         super().__init__(database, "package_releases", PackageRelease)
 
-    def find_by_package(
+    async def find_by_package(
         self, package_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[PackageRelease]:
         """
@@ -35,14 +35,14 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
         if isinstance(package_id, str):
             package_id = ObjectId(package_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"package_id": package_id},
             skip=skip,
             limit=limit,
             sort=[("publish_timestamp", -1)],
         )
 
-    def find_by_version(
+    async def find_by_version(
         self, package_id: str | ObjectId, version: str
     ) -> Optional[PackageRelease]:
         """
@@ -58,9 +58,9 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
         if isinstance(package_id, str):
             package_id = ObjectId(package_id)
 
-        return self.find_one({"package_id": package_id, "version": version})
+        return await self.find_one({"package_id": package_id, "version": version})
 
-    def find_by_publisher(
+    async def find_by_publisher(
         self, identity_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[PackageRelease]:
         """
@@ -77,14 +77,14 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
         if isinstance(identity_id, str):
             identity_id = ObjectId(identity_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"published_by": identity_id},
             skip=skip,
             limit=limit,
             sort=[("publish_timestamp", -1)],
         )
 
-    def find_recent(
+    async def find_recent(
         self, hours: int = 24, skip: int = 0, limit: int = 100
     ) -> List[PackageRelease]:
         """
@@ -101,14 +101,14 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
         cutoff = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         cutoff = cutoff.replace(hour=cutoff.hour - hours)
 
-        return self.find_many(
+        return await self.find_many(
             {"publish_timestamp": {"$gte": cutoff}},
             skip=skip,
             limit=limit,
             sort=[("publish_timestamp", -1)],
         )
 
-    def find_high_risk(
+    async def find_high_risk(
         self, threshold: float = 70.0, skip: int = 0, limit: int = 100
     ) -> List[PackageRelease]:
         """
@@ -122,7 +122,7 @@ class PackageReleaseRepository(BaseRepository[PackageRelease]):
         Returns:
             List of high-risk releases sorted by risk score
         """
-        return self.find_many(
+        return await self.find_many(
             {"risk_score": {"$gte": threshold}},
             skip=skip,
             limit=limit,

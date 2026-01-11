@@ -3,7 +3,7 @@ PR Watcher Service - npm registry polling agent.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -20,12 +20,18 @@ from repositories import (
     RiskAlertRepository,
     IdentityRepository,
 )
+from repositories.package_threat_assessment import PackageThreatAssessmentRepository
 from services.npm_client import NpmRegistryClient, NpmVersionInfo
 from services.github_client import GitHubApiClient
 from services.tarball_extractor import TarballExtractor, TarballContent
 from services.risk_scorer import RiskScorer
 from services.delta_service import DeltaService
 from services.package_service import get_or_create_package_with_enrichment, crawl_package_maintainers
+from services.ai_alert_service import AIAlertService
+from services.ai_threat_surface_service import AIThreatSurfaceService
+from services.ai_analysis_queue import AIAnalysisQueue
+from services.package_risk_aggregator import PackageRiskAggregator
+from env import OPENROUTER_API_KEY, AI_ANALYSIS_DELAY, AI_PRIORITY_THRESHOLD
 
 
 class WatcherService:
@@ -34,7 +40,7 @@ class WatcherService:
 
     Flow per package:
     1. Fetch package metadata from npm
-    2. Find versions published in last 7 days
+    2. Find the N most recent versions (max 5 by default)
     3. For each new version not in our database:
        a. Identify the publisher (npm maintainer)
        b. Check if maintainer is known (in Identity collection)
@@ -43,10 +49,19 @@ class WatcherService:
        e. Download and analyze tarball
        f. Calculate risk score
        g. Create PackageRelease record
-       h. If risky, create RiskAlert
+       h. Queue AI analysis (rate-limited, high-risk releases prioritized)
+       i. Compute deltas between consecutive versions
+       j. If risky, create rule-based RiskAlerts
+    4. Update package scan status
+
+    AI Analysis Queue:
+    - High-risk releases (>= threshold) are analyzed immediately
+    - Low-risk releases are queued and processed with delays
+    - Prevents API rate limits and reduces costs
     """
 
-    LOOKBACK_DAYS = 7
+    MAX_RELEASES_TO_TRACK = 5
+    MAX_CONCURRENT_PACKAGES = 8  # Limit concurrent package polls to fit in 30s window
 
     def __init__(self, database: Database):
         self.db = database
@@ -56,6 +71,7 @@ class WatcherService:
         self.release_repo = PackageReleaseRepository(database)
         self.alert_repo = RiskAlertRepository(database)
         self.identity_repo = IdentityRepository(database)
+        self.threat_surface_repo = PackageThreatAssessmentRepository(database)
 
         # Clients and analyzers
         self.npm_client = NpmRegistryClient()
@@ -63,6 +79,27 @@ class WatcherService:
         self.tarball_extractor = TarballExtractor()
         self.risk_scorer = RiskScorer()
         self.delta_service = DeltaService(database)
+        self.risk_aggregator = PackageRiskAggregator(database)
+
+        # AI analysis queue (only initialize if API key is available)
+        if OPENROUTER_API_KEY:
+            ai_alert_service = AIAlertService(database, OPENROUTER_API_KEY)
+            ai_threat_surface_service = AIThreatSurfaceService(database, OPENROUTER_API_KEY)
+            self.ai_queue = AIAnalysisQueue(
+                database=database,
+                ai_alert_service=ai_alert_service,
+                ai_threat_surface_service=ai_threat_surface_service,
+                delay_between_calls=AI_ANALYSIS_DELAY,
+                high_priority_threshold=AI_PRIORITY_THRESHOLD,
+            )
+            self.ai_queue.start_worker()
+            print(f"[watcher] AI analysis queue initialized (delay: {AI_ANALYSIS_DELAY}s, priority threshold: {AI_PRIORITY_THRESHOLD})")
+        else:
+            self.ai_queue = None
+            print("[watcher] WARNING: AI services disabled - OPENROUTER_API_KEY not found")
+
+        # Concurrency control for background polling
+        self._package_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_PACKAGES)
 
     async def poll_all_packages(self) -> dict:
         """
@@ -74,7 +111,7 @@ class WatcherService:
         print("[watcher] Starting poll cycle for all packages")
 
         # Get all packages from packages collection
-        all_packages = self.package_repo.find_many({})
+        all_packages = await self.package_repo.find_many({})
 
         if not all_packages:
             print("[watcher] No packages to poll")
@@ -102,9 +139,9 @@ class WatcherService:
             print("[watcher] No packages to poll")
             return {"packages_checked": 0, "new_releases": 0, "alerts_created": 0}
 
-        # Process packages concurrently (with rate limiting)
+        # Process packages with controlled concurrency (max 8 concurrent)
         results = await asyncio.gather(
-            *[self._poll_package(pkg) for pkg in packages],
+            *[self._poll_package_limited(pkg) for pkg in packages],
             return_exceptions=True,
         )
 
@@ -132,6 +169,34 @@ class WatcherService:
         print(f"[watcher] Poll cycle complete: {summary}")
         return summary
 
+    async def process_package(self, package: Package) -> dict:
+        """
+        Process a single package immediately (for newly added packages).
+
+        Args:
+            package: Package to process
+
+        Returns:
+            Processing results with counts of releases and alerts created
+        """
+        return await self._poll_package(package)
+
+    async def _poll_package_limited(self, package: Package) -> dict:
+        """
+        Poll package with concurrency control.
+
+        This wrapper ensures that only MAX_CONCURRENT_PACKAGES packages
+        are processed simultaneously, preventing resource exhaustion.
+
+        Args:
+            package: Package to poll
+
+        Returns:
+            Dict with counts of releases and alerts created
+        """
+        async with self._package_semaphore:
+            return await self._poll_package(package)
+
     async def _poll_package(self, package: Package) -> dict:
         """
         Poll a single package for new releases.
@@ -144,14 +209,11 @@ class WatcherService:
         """
         print(f"[watcher] Polling package: {package.name}")
 
-        # Calculate cutoff time
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.LOOKBACK_DAYS)
-
-        # Fetch recent versions from npm
-        recent_versions = await asyncio.to_thread(
-            self.npm_client.get_recent_versions,
+        # Fetch the N most recent versions from npm (with LOW priority - background job)
+        recent_versions = await self.npm_client.get_latest_versions(
             package.name,
-            cutoff,
+            self.MAX_RELEASES_TO_TRACK,
+            # priority defaults to LOW, which is correct for background jobs
         )
 
         if not recent_versions:
@@ -162,7 +224,7 @@ class WatcherService:
 
         for version_info in recent_versions:
             # Check if we already have this release
-            existing = self.release_repo.find_by_version(package.id, version_info.version)
+            existing = await self.release_repo.find_by_version(package.id, version_info.version)
             if existing:
                 continue
 
@@ -217,11 +279,11 @@ class WatcherService:
         is_first_time = False
 
         if maintainer_handle:
-            identity = self.identity_repo.find_by_handle(maintainer_handle, kind="npm")
+            identity = await self.identity_repo.find_by_handle(maintainer_handle, kind="npm")
             if not identity:
                 is_first_time = True
                 # Create new identity
-                identity = self._create_identity(maintainer_handle)
+                identity = await self._create_identity(maintainer_handle)
 
         # 2. Resolve GitHub username and fetch info
         github_info = None
@@ -233,9 +295,10 @@ class WatcherService:
                 self.github_client.get_user, github_username
             )
 
-        # 3. Download and analyze tarball
-        tarball_bytes = await asyncio.to_thread(
-            self.npm_client.download_tarball, version_info.tarball_url
+        # 3. Download and analyze tarball (with LOW priority - background job)
+        tarball_bytes = await self.npm_client.download_tarball(
+            version_info.tarball_url
+            # priority defaults to LOW, which is correct for background jobs
         )
 
         if tarball_bytes:
@@ -258,10 +321,11 @@ class WatcherService:
         )
 
         # 5. Create PackageRelease record
+        previous_version = await self._get_previous_version(package_id)
         release = PackageRelease(
             package_id=package_id,
             version=version_info.version,
-            previous_version=self._get_previous_version(package_id),
+            previous_version=previous_version,
             published_by=identity.id if identity else None,
             publish_timestamp=version_info.publish_time,
             tarball_integrity=version_info.integrity,
@@ -275,11 +339,24 @@ class WatcherService:
             ),
         )
 
-        created_release = self.release_repo.create(release)
+        created_release = await self.release_repo.create(release)
 
-        # 6. Compute delta if there's a previous version
+        # 6. Queue AI analysis (with rate limiting and prioritization)
+        if self.ai_queue:
+            self.ai_queue.queue_analysis(
+                package=package,
+                package_id=package_id,
+                release=created_release,
+                identity=identity,
+                github_info=github_info,
+                tarball_analysis=tarball_analysis,
+                delta=None,  # Delta not computed yet
+            )
+
+        # 7. Compute delta if there's a previous version
         delta_created = False
         alert_from_delta = False
+        delta = None
 
         if created_release.previous_version:
             try:
@@ -308,13 +385,13 @@ class WatcherService:
                             status="open",
                             analysis=delta.analysis,
                         )
-                        self.alert_repo.create(alert)
+                        await self.alert_repo.create(alert)
                         alert_from_delta = True
                         print(f"[watcher] ALERT: High-risk delta alert created")
             except Exception as e:
                 print(f"[watcher] ERROR: Failed to compute delta: {e}")
 
-        # 7. Create alert if needed (from release risk assessment)
+        # 8. Create alert if needed (from release risk assessment)
         alert_created = False
         if risk_assessment.should_alert:
             alert = RiskAlert(
@@ -331,15 +408,22 @@ class WatcherService:
                     source="rule",
                 ),
             )
-            self.alert_repo.create(alert)
+            await self.alert_repo.create(alert)
             alert_created = True
             print(
                 f"[watcher] ALERT: Alert created for {package.name}@{version_info.version}: "
                 f"{risk_assessment.alert_reason}"
             )
 
-        # 8. Update package last_scanned
-        self.package_repo.update(package_id, {"last_scanned": datetime.now(timezone.utc)})
+        # 10. Update package last_scanned
+        await self.package_repo.update(package_id, {"last_scanned": datetime.now(timezone.utc)})
+
+        # 11. Recalculate aggregate package risk score
+        try:
+            updated_risk_score = await self.risk_aggregator.update_package_risk_score(package_id)
+            print(f"[watcher] Updated package risk score for {package.name}: {updated_risk_score:.1f}")
+        except Exception as e:
+            print(f"[watcher] WARNING: Failed to update package risk score: {e}")
 
         return {
             "alert_created": alert_created,
@@ -347,7 +431,7 @@ class WatcherService:
             "alert_from_delta": alert_from_delta,
         }
 
-    def _create_identity(self, npm_handle: str) -> Identity:
+    async def _create_identity(self, npm_handle: str) -> Identity:
         """Create a new Identity for a first-time maintainer."""
         identity = Identity(
             kind="npm",
@@ -362,11 +446,11 @@ class WatcherService:
                 source="rule",
             ),
         )
-        return self.identity_repo.create(identity)
+        return await self.identity_repo.create(identity)
 
-    def _get_previous_version(self, package_id: ObjectId) -> Optional[str]:
+    async def _get_previous_version(self, package_id: ObjectId) -> Optional[str]:
         """Get the most recent version before this one."""
-        releases = self.release_repo.find_by_package(package_id, limit=1)
+        releases = await self.release_repo.find_by_package(package_id, limit=1)
         if releases:
             return releases[0].version
         return None
@@ -384,3 +468,4 @@ class WatcherService:
             return f"{prefix} from first-time maintainer"
 
         return f"{prefix} - {len(assessment.reasons)} risk factors identified"
+

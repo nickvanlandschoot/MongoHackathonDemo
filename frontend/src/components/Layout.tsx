@@ -27,6 +27,7 @@ export function Layout({
   pageTitle = 'PACKAGES',
 }: LayoutProps) {
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   const handleAddSuccess = () => {
     if (onPackageAdded) {
@@ -37,8 +38,12 @@ export function Layout({
   return (
     <div className='flex h-screen bg-neutral-950'>
       {/* Sidebar */}
-      <div className='w-64 min-w-0 max-w-64'>
-        <Sidebar onNewPackage={() => setShowAddModal(true)} />
+      <div className={`min-w-0 transition-all duration-300 ease-in-out ${isSidebarCollapsed ? 'w-16 max-w-16' : 'w-64 max-w-64'}`}>
+        <Sidebar
+          onNewPackage={() => setShowAddModal(true)}
+          isCollapsed={isSidebarCollapsed}
+          onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+        />
       </div>
 
       {/* Main Content */}

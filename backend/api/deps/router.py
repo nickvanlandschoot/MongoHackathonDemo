@@ -1,3 +1,5 @@
+from urllib.parse import unquote
+
 from fastapi import APIRouter, HTTPException
 from typing import Dict
 
@@ -72,7 +74,7 @@ async def get_deps_job_status_endpoint(job_id: str) -> Dict[str, object]:
     return job
 
 
-@router.get("/npm/{package}/{version}")
+@router.get("/npm/{package:path}/{version}")
 async def get_dependency_tree(package: str, version: str) -> Dict[str, object]:
     """
     Get dependency tree from database for a specific package version.
@@ -80,8 +82,10 @@ async def get_dependency_tree(package: str, version: str) -> Dict[str, object]:
     This endpoint reads existing dependency data from the database.
     To trigger a new dependency fetch, use POST /deps/npm/fetch instead.
 
+    Supports scoped npm packages (e.g., @scope/package).
+
     Args:
-        package: Package name
+        package: Package name (supports scoped packages like @scope/package)
         version: Package version
 
     Returns:
@@ -89,7 +93,12 @@ async def get_dependency_tree(package: str, version: str) -> Dict[str, object]:
 
     Example:
         GET /api/deps/npm/express/4.18.2
+        GET /api/deps/npm/@scope/package/1.0.0
     """
+    # URL-decode package name to handle any encoding artifacts
+    package = unquote(package)
+    version = unquote(version)
+    
     db = get_database()
     tree = db.dependency_trees.find_one(
         {"name": package, "version": version},

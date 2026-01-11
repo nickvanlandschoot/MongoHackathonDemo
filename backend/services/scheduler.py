@@ -11,6 +11,7 @@ from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from pymongo.database import Database
 
 from services.watcher import WatcherService
+from services.pause_manager import get_pause_manager
 
 
 class WatcherScheduler:
@@ -89,21 +90,33 @@ class WatcherScheduler:
         return True
 
     def pause(self) -> bool:
-        """Pause the scheduler without shutting down."""
+        """Pause the scheduler and all background processes."""
         if not self._is_running:
             return False
 
+        # Pause the scheduler job
         self.scheduler.pause_job(self.JOB_ID)
-        print("[scheduler] Watcher scheduler paused")
+
+        # Set global pause flag to stop background AI tasks
+        pause_manager = get_pause_manager()
+        pause_manager.pause()
+
+        print("[scheduler] Watcher scheduler and all background processes paused")
         return True
 
     def resume(self) -> bool:
-        """Resume a paused scheduler."""
+        """Resume the scheduler and all background processes."""
         if not self._is_running:
             return False
 
+        # Resume the scheduler job
         self.scheduler.resume_job(self.JOB_ID)
-        print("[scheduler] Watcher scheduler resumed")
+
+        # Clear global pause flag to allow background AI tasks
+        pause_manager = get_pause_manager()
+        pause_manager.resume()
+
+        print("[scheduler] Watcher scheduler and all background processes resumed")
         return True
 
     async def trigger_now(self) -> dict:

@@ -68,7 +68,7 @@ def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def get_deltas_for_package(package_id: str, skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+async def get_deltas_for_package(package_id: str, skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
     """
     Get all deltas for a package.
 
@@ -83,12 +83,12 @@ def get_deltas_for_package(package_id: str, skip: int = 0, limit: int = 100) -> 
     db = get_database()
     delta_repo = PackageDeltaRepository(db)
 
-    deltas = delta_repo.find_by_package(package_id, skip=skip, limit=limit)
+    deltas = await delta_repo.find_by_package(package_id, skip=skip, limit=limit)
 
     return [delta.model_dump(by_alias=True, mode="json") for delta in deltas]
 
 
-def get_delta(delta_id: str) -> Optional[Dict[str, Any]]:
+async def get_delta(delta_id: str) -> Optional[Dict[str, Any]]:
     """
     Get specific delta.
 
@@ -101,7 +101,7 @@ def get_delta(delta_id: str) -> Optional[Dict[str, Any]]:
     db = get_database()
     delta_repo = PackageDeltaRepository(db)
 
-    delta = delta_repo.find_by_id(ObjectId(delta_id))
+    delta = await delta_repo.find_by_id(ObjectId(delta_id))
 
     if delta:
         return delta.model_dump(by_alias=True, mode="json")

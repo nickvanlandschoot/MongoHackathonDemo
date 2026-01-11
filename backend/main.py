@@ -4,11 +4,13 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import env
+from api.alerts.router import router as alerts_router
 from api.deps.router import router as deps_router
 from api.packages.router import router as packages_router
 from api.identities.router import router as identities_router
 from api.watcher.router import router as watcher_router, init_scheduler, get_scheduler_instance
 from api.deltas.router import router as deltas_router
+from api.threat_surface.router import router as threat_surface_router
 from database import DatabaseManager, get_database, get_database_manager
 from models import Analysis, Package
 from repositories import PackageRepository
@@ -20,11 +22,13 @@ app = FastAPI(
 )
 
 # Include routers
+app.include_router(alerts_router)
 app.include_router(deps_router)
 app.include_router(packages_router)
 app.include_router(identities_router)
 app.include_router(watcher_router)
 app.include_router(deltas_router)
+app.include_router(threat_surface_router)
 
 # Initialize database manager
 db_manager = get_database_manager()

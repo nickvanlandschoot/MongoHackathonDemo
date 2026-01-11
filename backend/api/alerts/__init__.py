@@ -1,0 +1,3 @@
+"""
+Alert API module.
+"""

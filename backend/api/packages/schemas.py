@@ -34,3 +34,11 @@ class ListPackagesResponse(BaseModel):
     total: int
     skip: int
     limit: int
+
+
+class FetchMaintainersResponse(BaseModel):
+    """Response for triggering maintainer fetch."""
+
+    job_id: Optional[str] = Field(default=None, description="Job ID for polling status")
+    status: str = Field(..., description="Job status (pending, completed, etc.)")
+    message: str = Field(..., description="Human-readable message")

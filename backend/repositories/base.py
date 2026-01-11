@@ -2,6 +2,7 @@
 Base repository with common CRUD operations.
 """
 
+import asyncio
 from typing import Generic, List, Optional, Type, TypeVar
 
 from bson import ObjectId
@@ -32,7 +33,7 @@ class BaseRepository(Generic[T]):
         self.collection: Collection = database[collection_name]
         self.model_class = model_class
 
-    def create(self, entity: T) -> T:
+    async def create(self, entity: T) -> T:
         """
         Create a new document.
 
@@ -43,11 +44,11 @@ class BaseRepository(Generic[T]):
             Created entity with _id populated
         """
         entity_dict = entity.model_dump(by_alias=True, exclude={"id"})
-        result = self.collection.insert_one(entity_dict)
+        result = await asyncio.to_thread(self.collection.insert_one, entity_dict)
         entity_dict["_id"] = result.inserted_id
         return self.model_class(**entity_dict)
 
-    def find_by_id(self, entity_id: str | ObjectId) -> Optional[T]:
+    async def find_by_id(self, entity_id: str | ObjectId) -> Optional[T]:
         """
         Find document by ID.
 
@@ -60,10 +61,10 @@ class BaseRepository(Generic[T]):
         if isinstance(entity_id, str):
             entity_id = ObjectId(entity_id)
 
-        doc = self.collection.find_one({"_id": entity_id})
+        doc = await asyncio.to_thread(self.collection.find_one, {"_id": entity_id})
         return self.model_class(**doc) if doc else None
 
-    def find_one(self, filter_dict: dict) -> Optional[T]:
+    async def find_one(self, filter_dict: dict) -> Optional[T]:
         """
         Find single document matching filter.
 
@@ -73,10 +74,10 @@ class BaseRepository(Generic[T]):
         Returns:
             Entity if found, None otherwise
         """
-        doc = self.collection.find_one(filter_dict)
+        doc = await asyncio.to_thread(self.collection.find_one, filter_dict)
         return self.model_class(**doc) if doc else None
 
-    def find_many(
+    async def find_many(
         self,
         filter_dict: dict,
         skip: int = 0,
@@ -95,14 +96,15 @@ class BaseRepository(Generic[T]):
         Returns:
             List of entities
         """
-        cursor = self.collection.find(filter_dict).skip(skip).limit(limit)
+        def _find():
+            cursor = self.collection.find(filter_dict).skip(skip).limit(limit)
+            if sort:
+                cursor = cursor.sort(sort)
+            return [self.model_class(**doc) for doc in cursor]
 
-        if sort:
-            cursor = cursor.sort(sort)
+        return await asyncio.to_thread(_find)
 
-        return [self.model_class(**doc) for doc in cursor]
-
-    def find_all(
+    async def find_all(
         self, skip: int = 0, limit: int = 100, sort: Optional[List[tuple]] = None
     ) -> List[T]:
         """
@@ -116,9 +118,9 @@ class BaseRepository(Generic[T]):
         Returns:
             List of entities
         """
-        return self.find_many({}, skip=skip, limit=limit, sort=sort)
+        return await self.find_many({}, skip=skip, limit=limit, sort=sort)
 
-    def update(self, entity_id: str | ObjectId, update_dict: dict) -> Optional[T]:
+    async def update(self, entity_id: str | ObjectId, update_dict: dict) -> Optional[T]:
         """
         Update document by ID.
 
@@ -132,15 +134,17 @@ class BaseRepository(Generic[T]):
         if isinstance(entity_id, str):
             entity_id = ObjectId(entity_id)
 
-        result = self.collection.find_one_and_update(
-            {"_id": entity_id},
-            {"$set": update_dict},
-            return_document=True,
-        )
+        def _update():
+            return self.collection.find_one_and_update(
+                {"_id": entity_id},
+                {"$set": update_dict},
+                return_document=True,
+            )
 
+        result = await asyncio.to_thread(_update)
         return self.model_class(**result) if result else None
 
-    def update_one(self, filter_dict: dict, update_dict: dict) -> Optional[T]:
+    async def update_one(self, filter_dict: dict, update_dict: dict) -> Optional[T]:
         """
         Update single document matching filter.
 
@@ -151,15 +155,17 @@ class BaseRepository(Generic[T]):
         Returns:
             Updated entity if found, None otherwise
         """
-        result = self.collection.find_one_and_update(
-            filter_dict,
-            {"$set": update_dict},
-            return_document=True,
-        )
+        def _update():
+            return self.collection.find_one_and_update(
+                filter_dict,
+                {"$set": update_dict},
+                return_document=True,
+            )
 
+        result = await asyncio.to_thread(_update)
         return self.model_class(**result) if result else None
 
-    def delete(self, entity_id: str | ObjectId) -> bool:
+    async def delete(self, entity_id: str | ObjectId) -> bool:
         """
         Delete document by ID.
 
@@ -172,10 +178,10 @@ class BaseRepository(Generic[T]):
         if isinstance(entity_id, str):
             entity_id = ObjectId(entity_id)
 
-        result = self.collection.delete_one({"_id": entity_id})
+        result = await asyncio.to_thread(self.collection.delete_one, {"_id": entity_id})
         return result.deleted_count > 0
 
-    def delete_one(self, filter_dict: dict) -> bool:
+    async def delete_one(self, filter_dict: dict) -> bool:
         """
         Delete single document matching filter.
 
@@ -185,10 +191,10 @@ class BaseRepository(Generic[T]):
         Returns:
             True if deleted, False if not found
         """
-        result = self.collection.delete_one(filter_dict)
+        result = await asyncio.to_thread(self.collection.delete_one, filter_dict)
         return result.deleted_count > 0
 
-    def delete_many(self, filter_dict: dict) -> int:
+    async def delete_many(self, filter_dict: dict) -> int:
         """
         Delete multiple documents matching filter.
 
@@ -198,10 +204,10 @@ class BaseRepository(Generic[T]):
         Returns:
             Number of documents deleted
         """
-        result = self.collection.delete_many(filter_dict)
+        result = await asyncio.to_thread(self.collection.delete_many, filter_dict)
         return result.deleted_count
 
-    def count(self, filter_dict: Optional[dict] = None) -> int:
+    async def count(self, filter_dict: Optional[dict] = None) -> int:
         """
         Count documents matching filter.
 
@@ -211,9 +217,9 @@ class BaseRepository(Generic[T]):
         Returns:
             Document count
         """
-        return self.collection.count_documents(filter_dict or {})
+        return await asyncio.to_thread(self.collection.count_documents, filter_dict or {})
 
-    def exists(self, filter_dict: dict) -> bool:
+    async def exists(self, filter_dict: dict) -> bool:
         """
         Check if document exists matching filter.
 
@@ -223,4 +229,5 @@ class BaseRepository(Generic[T]):
         Returns:
             True if exists, False otherwise
         """
-        return self.collection.count_documents(filter_dict, limit=1) > 0
+        count = await asyncio.to_thread(self.collection.count_documents, filter_dict, limit=1)
+        return count > 0

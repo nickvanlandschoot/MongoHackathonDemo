@@ -17,7 +17,7 @@ async def main():
     npm_client = NpmRegistryClient()
 
     # Find all packages without maintainers crawled
-    packages = repo.find_many({"scan_state.maintainers_crawled": False})
+    packages = await repo.find_many({"scan_state.maintainers_crawled": False})
 
     print(f"Found {len(packages)} packages needing maintainer crawl")
 

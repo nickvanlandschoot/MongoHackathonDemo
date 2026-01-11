@@ -17,7 +17,7 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
     def __init__(self, database: Database):
         super().__init__(database, "risk_alerts", RiskAlert)
 
-    def find_by_package(
+    async def find_by_package(
         self, package_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[RiskAlert]:
         """
@@ -34,14 +34,14 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         if isinstance(package_id, str):
             package_id = ObjectId(package_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"package_id": package_id},
             skip=skip,
             limit=limit,
             sort=[("timestamp", -1)],
         )
 
-    def find_by_status(
+    async def find_by_status(
         self, status: str, skip: int = 0, limit: int = 100
     ) -> List[RiskAlert]:
         """
@@ -55,11 +55,11 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         Returns:
             List of alerts sorted by timestamp (newest first)
         """
-        return self.find_many(
+        return await self.find_many(
             {"status": status}, skip=skip, limit=limit, sort=[("timestamp", -1)]
         )
 
-    def find_open_alerts(self, skip: int = 0, limit: int = 100) -> List[RiskAlert]:
+    async def find_open_alerts(self, skip: int = 0, limit: int = 100) -> List[RiskAlert]:
         """
         Find open alerts.
 
@@ -70,14 +70,14 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         Returns:
             List of open alerts sorted by severity (highest first)
         """
-        return self.find_many(
+        return await self.find_many(
             {"status": "open"},
             skip=skip,
             limit=limit,
             sort=[("severity", -1), ("timestamp", -1)],
         )
 
-    def find_by_release(
+    async def find_by_release(
         self, release_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[RiskAlert]:
         """
@@ -94,11 +94,11 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         if isinstance(release_id, str):
             release_id = ObjectId(release_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"release_id": release_id}, skip=skip, limit=limit, sort=[("timestamp", -1)]
         )
 
-    def find_by_delta(
+    async def find_by_delta(
         self, delta_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[RiskAlert]:
         """
@@ -115,11 +115,11 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         if isinstance(delta_id, str):
             delta_id = ObjectId(delta_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"delta_id": delta_id}, skip=skip, limit=limit, sort=[("timestamp", -1)]
         )
 
-    def find_high_severity(
+    async def find_high_severity(
         self, threshold: float = 70.0, skip: int = 0, limit: int = 100
     ) -> List[RiskAlert]:
         """
@@ -133,7 +133,7 @@ class RiskAlertRepository(BaseRepository[RiskAlert]):
         Returns:
             List of high-severity alerts sorted by severity
         """
-        return self.find_many(
+        return await self.find_many(
             {"severity": {"$gte": threshold}},
             skip=skip,
             limit=limit,

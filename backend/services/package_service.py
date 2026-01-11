@@ -3,6 +3,7 @@ Package service - shared business logic for package operations.
 """
 
 import asyncio
+import os
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -12,7 +13,9 @@ from models.identity import Identity
 from repositories.package import PackageRepository
 from repositories.identity import IdentityRepository
 from services.npm_client import NpmRegistryClient
+from services.priority_resource_manager import Priority
 from services.github_client import GitHubApiClient
+from services.package_risk_aggregator import PackageRiskAggregator
 from database import get_database
 
 
@@ -20,6 +23,8 @@ async def get_or_create_package_with_enrichment(
     package_name: str,
     npm_client: NpmRegistryClient,
     repo: PackageRepository,
+    priority: Priority = Priority.LOW,
+    is_dependency: bool = False,
 ) -> Optional[Package]:
     """
     Get existing package or create new one with full metadata and GitHub enrichment.
@@ -31,19 +36,19 @@ async def get_or_create_package_with_enrichment(
         package_name: npm package name (supports scoped packages)
         npm_client: NpmRegistryClient instance
         repo: PackageRepository instance
+        priority: Priority level (HIGH for user requests, LOW for background jobs)
+        is_dependency: Whether this package is a dependency (default False)
 
     Returns:
         Existing or newly created Package (None if npm fetch fails)
     """
     # Check if package already exists
-    existing = repo.find_by_name(package_name)
+    existing = await repo.find_by_name(package_name)
     if existing:
         return existing
 
-    # Fetch metadata from npm registry (offload HTTP call to thread)
-    metadata = await asyncio.to_thread(
-        npm_client.get_package_metadata, package_name
-    )
+    # Fetch metadata from npm registry with priority
+    metadata = await npm_client.get_package_metadata(package_name, priority)
     if not metadata:
         print(f"[package_service] Package '{package_name}' not found on npm registry")
         return None
@@ -81,6 +86,7 @@ async def get_or_create_package_with_enrichment(
         owner=owner,
         risk_score=0.0,
         last_scanned=datetime.now(timezone.utc),
+        is_dependency=is_dependency,
         scan_state=ScanState(),
         analysis=Analysis(
             summary=f"Package {package_name} added for monitoring",
@@ -91,16 +97,46 @@ async def get_or_create_package_with_enrichment(
     )
 
     # Save to database
-    created = repo.create(package)
+    created = await repo.create(package)
     print(f"[package_service] Created Package: {package_name} (repo: {repo_url or 'none'})")
 
-    # Crawl maintainers from npm
-    maintainer_count = await crawl_package_maintainers(package_name, npm_client, repo)
+    # Crawl maintainers from npm (pass through priority)
+    maintainer_count = await crawl_package_maintainers(package_name, npm_client, repo, priority)
     print(f"[package_service] Crawled {maintainer_count} maintainers for {package_name}")
 
     # Enrich with GitHub data if repo_url exists
     if repo_url:
         await enrich_github_data(repo_url)
+
+    # Calculate initial risk score
+    try:
+        db = get_database()
+        risk_aggregator = PackageRiskAggregator(db)
+        if created.id:
+            initial_risk = await risk_aggregator.update_package_risk_score(created.id)
+            print(f"[package_service] Initial risk score for {package_name}: {initial_risk:.1f}")
+    except Exception as e:
+        print(f"[package_service] WARNING: Failed to calculate initial risk score: {e}")
+
+    # Trigger threat assessment generation if this is a top-level package (not a dependency)
+    if not is_dependency:
+        try:
+            # Import here to avoid circular imports
+            from services.ai_threat_surface_service import AIThreatSurfaceService
+
+            # Check if OpenRouter API key is available
+            OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+            if OPENROUTER_API_KEY:
+                print(f"[package_service] Triggering threat assessment for {package_name}...")
+                db = get_database()
+                threat_service = AIThreatSurfaceService(db, OPENROUTER_API_KEY)
+                # Run in background task to avoid blocking
+                asyncio.create_task(threat_service.generate_assessment_for_package(package_name))
+                print(f"[package_service] Threat assessment task started")
+            else:
+                print(f"[package_service] OpenRouter API key not found, skipping threat assessment")
+        except Exception as e:
+            print(f"[package_service] WARNING: Failed to trigger threat assessment: {e}")
 
     return created
 
@@ -109,6 +145,7 @@ async def crawl_package_maintainers(
     package_name: str,
     npm_client: NpmRegistryClient,
     repo: PackageRepository,
+    priority: Priority = Priority.LOW,
 ) -> int:
     """
     Crawl npm package maintainers and create Identity records.
@@ -120,15 +157,14 @@ async def crawl_package_maintainers(
         package_name: npm package name
         npm_client: NpmRegistryClient instance
         repo: PackageRepository instance
+        priority: Priority level (HIGH for user requests, LOW for background jobs)
 
     Returns:
         Number of maintainers processed
     """
     try:
-        # Fetch package metadata (offload HTTP call to thread)
-        metadata = await asyncio.to_thread(
-            npm_client.get_package_metadata, package_name
-        )
+        # Fetch package metadata with priority
+        metadata = await npm_client.get_package_metadata(package_name, priority)
         if not metadata or not metadata.maintainers:
             print(f"[package_service] No maintainers found for {package_name}")
             return 0
@@ -142,7 +178,7 @@ async def crawl_package_maintainers(
                 continue
 
             # Check if identity already exists
-            existing = identity_repo.find_by_handle(maintainer_handle, kind="npm")
+            existing = await identity_repo.find_by_handle(maintainer_handle, kind="npm")
             if existing:
                 print(f"[package_service] npm identity already exists: {maintainer_handle}")
                 maintainers_processed += 1
@@ -163,14 +199,14 @@ async def crawl_package_maintainers(
                 ),
             )
 
-            identity_repo.create(identity)
+            await identity_repo.create(identity)
             print(f"[package_service] Created npm identity: {maintainer_handle}")
             maintainers_processed += 1
 
         # Update package scan_state to mark maintainers as crawled
-        package = repo.find_by_name(package_name)
+        package = await repo.find_by_name(package_name)
         if package and package.id:
-            repo.update(
+            await repo.update(
                 package.id,
                 {
                     "scan_state.maintainers_crawled": True,
@@ -212,7 +248,7 @@ async def enrich_github_data(repo_url: str) -> None:
         # Check if identity already exists
         db = get_database()
         identity_repo = IdentityRepository(db)
-        existing = identity_repo.find_by_handle(github_username, kind="github")
+        existing = await identity_repo.find_by_handle(github_username, kind="github")
 
         if existing:
             print(f"[package_service] GitHub identity already exists: {github_username}")
@@ -240,7 +276,7 @@ async def enrich_github_data(repo_url: str) -> None:
             ),
         )
 
-        identity_repo.create(identity)
+        await identity_repo.create(identity)
         print(f"[package_service] Created GitHub identity: {github_username}")
 
     except Exception as e:

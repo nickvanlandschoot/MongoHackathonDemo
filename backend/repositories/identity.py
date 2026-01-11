@@ -16,7 +16,7 @@ class IdentityRepository(BaseRepository[Identity]):
     def __init__(self, database: Database):
         super().__init__(database, "identities", Identity)
 
-    def find_by_handle(self, handle: str, kind: Optional[str] = None) -> Optional[Identity]:
+    async def find_by_handle(self, handle: str, kind: Optional[str] = None) -> Optional[Identity]:
         """
         Find identity by handle.
 
@@ -31,9 +31,9 @@ class IdentityRepository(BaseRepository[Identity]):
         if kind:
             filter_dict["kind"] = kind
 
-        return self.find_one(filter_dict)
+        return await self.find_one(filter_dict)
 
-    def find_by_kind(self, kind: str, skip: int = 0, limit: int = 100) -> List[Identity]:
+    async def find_by_kind(self, kind: str, skip: int = 0, limit: int = 100) -> List[Identity]:
         """
         Find identities by kind.
 
@@ -45,9 +45,9 @@ class IdentityRepository(BaseRepository[Identity]):
         Returns:
             List of identities
         """
-        return self.find_many({"kind": kind}, skip=skip, limit=limit)
+        return await self.find_many({"kind": kind}, skip=skip, limit=limit)
 
-    def find_by_affiliation(
+    async def find_by_affiliation(
         self, affiliation_tag: str, skip: int = 0, limit: int = 100
     ) -> List[Identity]:
         """
@@ -61,9 +61,9 @@ class IdentityRepository(BaseRepository[Identity]):
         Returns:
             List of identities
         """
-        return self.find_many({"affiliation_tag": affiliation_tag}, skip=skip, limit=limit)
+        return await self.find_many({"affiliation_tag": affiliation_tag}, skip=skip, limit=limit)
 
-    def find_high_risk(
+    async def find_high_risk(
         self, threshold: float = 70.0, skip: int = 0, limit: int = 100
     ) -> List[Identity]:
         """
@@ -77,7 +77,7 @@ class IdentityRepository(BaseRepository[Identity]):
         Returns:
             List of high-risk identities
         """
-        return self.find_many(
+        return await self.find_many(
             {"risk_score": {"$gte": threshold}},
             skip=skip,
             limit=limit,

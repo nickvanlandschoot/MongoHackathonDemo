@@ -1,11 +1,12 @@
 import asyncio
-import requests
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Dict, Set, Optional, Any
 
 from database import get_database
 from services.background_jobs import get_job_manager
 from services.npm_client import NpmRegistryClient
+from services.priority_resource_manager import Priority
 from services.package_service import get_or_create_package_with_enrichment
 from repositories.package import PackageRepository
 
@@ -14,6 +15,7 @@ async def _fetch_npm_deps_internal(
     package: str,
     version: str,
     depth: int = 2,
+    priority: Priority = Priority.HIGH,  # User-initiated dependency fetch
     _visited: Optional[Set[str]] = None,
     _current_depth: int = 0,
     _db=None,
@@ -63,15 +65,16 @@ async def _fetch_npm_deps_internal(
     _visited.add(pkg_id)
     print(f"{indent}↳ Marked {pkg_id} as visited")
 
-    # Fetch package metadata from npm registry
+    # Fetch version-specific metadata from npm registry using NpmRegistryClient with priority
     try:
-        url = f"https://registry.npmjs.org/{package}/{version}"
-        print(f"{indent}↳ Requesting {url}")
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        print(f"{indent}↳ Requesting {package}@{version} via NpmRegistryClient (priority: {priority.name})")
+        data = await _npm_client.get_version_metadata(package, version, priority)
+
+        if not data:
+            raise ValueError(f"Package '{package}@{version}' not found on npm registry")
+
         print(f"{indent}✓ Successfully fetched {package}@{version}")
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"{indent}✗ Failed to fetch {package}@{version}: {e}")
         return {
             "error": str(e),
@@ -79,17 +82,21 @@ async def _fetch_npm_deps_internal(
             "version": version
         }
 
-    # Create Package record for this dependency (if not exists)
-    try:
-        await get_or_create_package_with_enrichment(
-            package_name=package,
-            npm_client=_npm_client,
-            repo=_package_repo,
-        )
-        print(f"{indent}✓ Package record ensured for {package}")
-    except Exception as e:
-        # Don't fail the dependency tree fetch if package creation fails
-        print(f"{indent}⚠ Warning: Failed to create package record for {package}: {e}")
+    # Create Package record for this dependency (if not exists) - marked as dependency
+    # This allows releases, maintainers, and deltas to be tracked
+    if _current_depth > 0:  # Only create packages for dependencies, not the root package
+        try:
+            await get_or_create_package_with_enrichment(
+                package_name=package,
+                npm_client=_npm_client,
+                repo=_package_repo,
+                priority=priority,  # Pass through priority
+                is_dependency=True,  # Mark as dependency so it's filtered from list view
+            )
+            print(f"{indent}✓ Package record ensured for dependency {package}")
+        except Exception as e:
+            # Don't fail the dependency tree fetch if package creation fails
+            print(f"{indent}⚠ Warning: Failed to create package record for {package}: {e}")
 
     # Extract maintainers from npm data
     maintainers = []
@@ -120,7 +127,7 @@ async def _fetch_npm_deps_internal(
         clean_version = dep_version.lstrip("^~>=<")
         print(f"{indent}    • {dep_name}@{dep_version}")
         fetch_tasks.append(
-            _fetch_npm_deps_internal(dep_name, clean_version, depth, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
+            _fetch_npm_deps_internal(dep_name, clean_version, depth, priority, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
         )
         dep_info.append(("dependencies", dep_name, dep_version, clean_version))
 
@@ -132,7 +139,7 @@ async def _fetch_npm_deps_internal(
         clean_version = dep_version.lstrip("^~>=<")
         print(f"{indent}    • {dep_name}@{dep_version}")
         fetch_tasks.append(
-            _fetch_npm_deps_internal(dep_name, clean_version, depth, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
+            _fetch_npm_deps_internal(dep_name, clean_version, depth, priority, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
         )
         dep_info.append(("devDependencies", dep_name, dep_version, clean_version))
 
@@ -144,7 +151,7 @@ async def _fetch_npm_deps_internal(
         clean_version = dep_version.lstrip("^~>=<")
         print(f"{indent}    • {dep_name}@{dep_version}")
         fetch_tasks.append(
-            _fetch_npm_deps_internal(dep_name, clean_version, depth, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
+            _fetch_npm_deps_internal(dep_name, clean_version, depth, priority, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
         )
         dep_info.append(("optionalDependencies", dep_name, dep_version, clean_version))
 
@@ -156,7 +163,7 @@ async def _fetch_npm_deps_internal(
         clean_version = dep_version.lstrip("^~>=<")
         print(f"{indent}    • {dep_name}@{dep_version}")
         fetch_tasks.append(
-            _fetch_npm_deps_internal(dep_name, clean_version, depth, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
+            _fetch_npm_deps_internal(dep_name, clean_version, depth, priority, _visited, _current_depth + 1, _db, _npm_client, _package_repo)
         )
         dep_info.append(("peerDependencies", dep_name, dep_version, clean_version))
 
@@ -183,7 +190,7 @@ async def _fetch_npm_deps_internal(
         if _db is None:
             _db = get_database()
 
-        result["fetched_at"] = datetime.utcnow()
+        result["fetched_at"] = datetime.now(timezone.utc)
 
         # Upsert based on name and version
         print(f"{indent}💾 Storing {package}@{version} in database...")
@@ -206,6 +213,23 @@ async def _fetch_npm_deps_internal(
             }
         )
         print(f"{indent}✓ Updated package scan_state")
+
+        # Trigger threat assessment generation after dependencies are scanned
+        try:
+            # Import here to avoid circular imports
+            from services.ai_threat_surface_service import AIThreatSurfaceService
+
+            # Check if OpenRouter API key is available
+            OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+            if OPENROUTER_API_KEY:
+                print(f"{indent}🔍 Triggering threat assessment for {package}...")
+                threat_service = AIThreatSurfaceService(_db, OPENROUTER_API_KEY)
+                asyncio.create_task(threat_service.generate_assessment_for_package(package))
+                print(f"{indent}✓ Threat assessment task started")
+            else:
+                print(f"{indent}⚠️  OpenRouter API key not found, skipping threat assessment")
+        except Exception as e:
+            print(f"{indent}⚠️  Failed to trigger threat assessment: {e}")
 
     print(f"{indent}✓ Completed {package}@{version}")
     return result

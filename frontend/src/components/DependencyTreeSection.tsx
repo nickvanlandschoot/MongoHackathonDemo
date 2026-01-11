@@ -3,11 +3,12 @@
  */
 
 import { useEffect, useState, useMemo } from 'react';
-import { AlertTriangle, Filter } from 'lucide-react';
+import { Loader2, Package, Code, CircleDashed, Users } from 'lucide-react';
 import { depsApi } from '@/lib/api';
 import type { DependencyTree } from '@/lib/api';
 import { DependencyStatsBar } from './DependencyStats';
 import { DependencyDepthGroup } from './DependencyDepthGroup';
+import { useJobPolling } from '@/hooks/useJobPolling';
 import {
   flattenByDepth,
   extractStats,
@@ -18,26 +19,69 @@ import {
 interface DependencyTreeSectionProps {
   packageName: string;
   version?: string;
-  depsCrawled: boolean;
+  onDepsCrawled?: () => void;
+  onStatsLoaded?: (stats: ReturnType<typeof extractStats> | null) => void;
+  hideStatsBar?: boolean;
 }
 
 export function DependencyTreeSection({
   packageName,
   version,
-  depsCrawled,
+  onDepsCrawled,
+  onStatsLoaded,
+  hideStatsBar = false,
 }: DependencyTreeSectionProps) {
   const [tree, setTree] = useState<DependencyTree | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterTypes, setFilterTypes] = useState<DependencyType[]>(['prod']);
+  const [jobId, setJobId] = useState<string | null>(null);
 
+  // Poll job status when fetching dependencies
+  const { isPolling } = useJobPolling({
+    jobId,
+    onComplete: async () => {
+      // Job completed, refetch the dependency tree
+      try {
+        let versionToFetch = version;
+        if (!versionToFetch) {
+          const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`);
+          if (response.ok) {
+            const npmData = await response.json();
+            versionToFetch = npmData.version;
+          }
+        }
+
+        if (versionToFetch) {
+          const data = await depsApi.get(packageName, versionToFetch);
+          setTree(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch dependencies after job completion:', err);
+      } finally {
+        setJobId(null);
+        setLoading(false);
+        onDepsCrawled?.();
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setJobId(null);
+      setLoading(false);
+    },
+  });
+
+  // Fetch dependencies - try to get existing data first, trigger crawl if needed
   useEffect(() => {
     const fetchDependencies = async () => {
+      // Skip if already polling a job
+      if (jobId) return;
+
       setLoading(true);
       setError(null);
 
       try {
-        // If no version provided, fetch latest from npm
+        // Get version to fetch
         let versionToFetch = version;
         if (!versionToFetch) {
           const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`);
@@ -52,20 +96,30 @@ export function DependencyTreeSection({
           throw new Error('Could not determine package version');
         }
 
-        // Get existing dependency tree from database (does not trigger a new crawl)
-        const data = await depsApi.get(packageName, versionToFetch);
-        setTree(data);
+        // First, try to get existing dependency tree from database
+        try {
+          const data = await depsApi.get(packageName, versionToFetch);
+          setTree(data);
+          setLoading(false);
+        } catch (err) {
+          // If 404 or data doesn't exist, trigger a new crawl
+          if (err instanceof Error && err.message.includes('not found')) {
+            console.log('No existing dependency data found, triggering crawl...');
+            const result = await depsApi.triggerFetch(packageName, versionToFetch, 3);
+            setJobId(result.job_id);
+            // Keep loading state active while job runs
+          } else {
+            throw err;
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch dependencies');
-      } finally {
         setLoading(false);
       }
     };
 
-    if (depsCrawled) {
-      fetchDependencies();
-    }
-  }, [packageName, version, depsCrawled]);
+    fetchDependencies();
+  }, [packageName, version, jobId]);
 
   // Process tree data
   const { stats, groupedDeps } = useMemo(() => {
@@ -80,36 +134,35 @@ export function DependencyTreeSection({
     return { stats: treeStats, groupedDeps: filtered };
   }, [tree, filterTypes]);
 
+  // Notify parent of stats changes
+  useEffect(() => {
+    onStatsLoaded?.(stats);
+  }, [stats, onStatsLoaded]);
+
   // Toggle filter type
   const toggleFilter = (type: DependencyType) => {
     setFilterTypes((prev) => {
       if (prev.includes(type)) {
-        // Don't allow removing all filters
-        if (prev.length === 1) return prev;
+        // Allow removing all filters (0 selections allowed)
         return prev.filter((t) => t !== type);
       }
       return [...prev, type];
     });
   };
 
-  // Not crawled yet
-  if (!depsCrawled) {
+  // Loading or polling state
+  if (loading || isPolling) {
     return (
       <div className="border border-neutral-800 bg-neutral-900/50 p-8 text-center">
-        <AlertTriangle className="mx-auto h-8 w-8 text-neutral-600" />
+        <Loader2 className="mx-auto h-8 w-8 animate-spin text-neutral-400" />
         <p className="mt-2 text-sm text-neutral-400">
-          Dependencies not yet crawled. Check back after the next scan.
+          {isPolling ? 'Crawling dependencies...' : 'Loading dependencies...'}
         </p>
-      </div>
-    );
-  }
-
-  // Loading state
-  if (loading) {
-    return (
-      <div className="border border-neutral-800 bg-neutral-900/50 p-8 text-center">
-        <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-neutral-800 border-t-neutral-400" />
-        <p className="mt-2 text-sm text-neutral-400">Loading dependencies...</p>
+        {isPolling && (
+          <p className="mt-1 text-xs text-neutral-500">
+            This can take a minute or two.
+          </p>
+        )}
       </div>
     );
   }
@@ -136,7 +189,7 @@ export function DependencyTreeSection({
   if (stats.total === 0) {
     return (
       <div className="space-y-4">
-        <DependencyStatsBar stats={stats} />
+        {!hideStatsBar && <DependencyStatsBar stats={stats} />}
         <div className="border border-neutral-800 bg-neutral-900/50 p-8 text-center">
           <p className="text-sm text-neutral-400">This package has no dependencies.</p>
         </div>
@@ -152,54 +205,62 @@ export function DependencyTreeSection({
   return (
     <div className="space-y-6">
       {/* Stats Bar */}
-      <DependencyStatsBar stats={stats} />
+      {!hideStatsBar && <DependencyStatsBar stats={stats} />}
 
       {/* Filter Controls */}
-      <div className="flex items-center gap-3">
-        <Filter className="h-4 w-4 text-neutral-500" />
-        <span className="text-sm text-neutral-400">Show:</span>
-        <div className="flex gap-2">
-          <button
-            onClick={() => toggleFilter('prod')}
-            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-              filterTypes.includes('prod')
-                ? 'bg-green-600 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
-            }`}
-          >
-            Production
-          </button>
-          <button
-            onClick={() => toggleFilter('dev')}
-            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-              filterTypes.includes('dev')
-                ? 'bg-blue-600 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
-            }`}
-          >
-            Development
-          </button>
-          <button
-            onClick={() => toggleFilter('optional')}
-            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-              filterTypes.includes('optional')
-                ? 'bg-yellow-600 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
-            }`}
-          >
-            Optional
-          </button>
-          <button
-            onClick={() => toggleFilter('peer')}
-            className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-              filterTypes.includes('peer')
-                ? 'bg-purple-600 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
-            }`}
-          >
-            Peer
-          </button>
-        </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => toggleFilter('prod')}
+          className={`inline-flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors border ${
+            filterTypes.includes('prod')
+              ? 'bg-emerald-900/80 text-emerald-300 border-emerald-800'
+              : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border-transparent'
+          }`}
+        >
+          <div className="flex h-4 w-4 items-center justify-center">
+            <Package className="h-3 w-3" strokeWidth={1.5} />
+          </div>
+          Production
+        </button>
+        <button
+          onClick={() => toggleFilter('dev')}
+          className={`inline-flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors border ${
+            filterTypes.includes('dev')
+              ? 'bg-cyan-900/80 text-cyan-300 border-cyan-800'
+              : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border-transparent'
+          }`}
+        >
+          <div className="flex h-4 w-4 items-center justify-center">
+            <Code className="h-3 w-3" strokeWidth={1.5} />
+          </div>
+          Development
+        </button>
+        <button
+          onClick={() => toggleFilter('optional')}
+          className={`inline-flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors border ${
+            filterTypes.includes('optional')
+              ? 'bg-amber-900/80 text-amber-300 border-amber-800'
+              : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border-transparent'
+          }`}
+        >
+          <div className="flex h-4 w-4 items-center justify-center">
+            <CircleDashed className="h-3 w-3" strokeWidth={1.5} />
+          </div>
+          Optional
+        </button>
+        <button
+          onClick={() => toggleFilter('peer')}
+          className={`inline-flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium transition-colors border ${
+            filterTypes.includes('peer')
+              ? 'bg-violet-900/80 text-violet-300 border-violet-800'
+              : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border-transparent'
+          }`}
+        >
+          <div className="flex h-4 w-4 items-center justify-center">
+            <Users className="h-3 w-3" strokeWidth={1.5} />
+          </div>
+          Peer
+        </button>
       </div>
 
       {/* Dependency Tree grouped by depth */}

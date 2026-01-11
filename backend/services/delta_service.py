@@ -58,7 +58,7 @@ class DeltaService:
             return None
 
         # Check if delta already exists
-        existing_delta = self.delta_repo.find_delta(package_id, from_version, to_version)
+        existing_delta = await self.delta_repo.find_delta(package_id, from_version, to_version)
         if existing_delta:
             print(
                 f"[delta_service] Delta already exists: {from_version} -> {to_version}"
@@ -66,7 +66,7 @@ class DeltaService:
             return existing_delta
 
         # Get package metadata
-        package = self.package_repo.find_by_id(package_id)
+        package = await self.package_repo.find_by_id(package_id)
         if not package or not package.id:
             print(f"[delta_service] ERROR: Package not found: {package_id}")
             return None
@@ -133,7 +133,7 @@ class DeltaService:
         )
 
         # Save to database
-        created_delta = self.delta_repo.create(delta)
+        created_delta = await self.delta_repo.create(delta)
 
         print(
             f"[delta_service] Delta computed: {package.name} "
@@ -155,10 +155,10 @@ class DeltaService:
         Returns:
             TarballContent or None on failure
         """
-        # Get package metadata
-        metadata = await asyncio.to_thread(
-            self.npm_client.get_package_metadata, package_name
-        )
+        # Get package metadata (LOW priority - background delta computation)
+        from services.priority_resource_manager import Priority
+
+        metadata = await self.npm_client.get_package_metadata(package_name, Priority.LOW)
 
         if not metadata or version not in metadata.versions:
             print(
@@ -168,10 +168,8 @@ class DeltaService:
 
         version_info = metadata.versions[version]
 
-        # Download tarball
-        tarball_bytes = await asyncio.to_thread(
-            self.npm_client.download_tarball, version_info.tarball_url
-        )
+        # Download tarball (LOW priority - background delta computation)
+        tarball_bytes = await self.npm_client.download_tarball(version_info.tarball_url, Priority.LOW)
 
         if not tarball_bytes:
             print(
@@ -180,7 +178,9 @@ class DeltaService:
             return None
 
         # Extract tarball content
-        content = self.tarball_extractor.extract(tarball_bytes)
+        content = await asyncio.to_thread(
+            self.tarball_extractor.extract, tarball_bytes
+        )
 
         return content
 
@@ -383,7 +383,7 @@ class DeltaService:
         print(f"[delta_service] Starting backfill for last {num_releases} releases per package")
 
         # Get all packages
-        packages = self.package_repo.find_many({})
+        packages = await self.package_repo.find_many({})
 
         total_deltas = 0
         errors = 0
@@ -393,7 +393,7 @@ class DeltaService:
                 continue  # Skip packages without ID
 
             # Get most recent N releases, sorted by publish_timestamp descending
-            releases = self.release_repo.find_by_package(
+            releases = await self.release_repo.find_by_package(
                 package.id, skip=0, limit=num_releases
             )
 

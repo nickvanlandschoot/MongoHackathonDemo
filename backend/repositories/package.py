@@ -16,7 +16,7 @@ class PackageRepository(BaseRepository[Package]):
     def __init__(self, database: Database):
         super().__init__(database, "packages", Package)
 
-    def find_by_name(self, name: str) -> Optional[Package]:
+    async def find_by_name(self, name: str) -> Optional[Package]:
         """
         Find package by name.
 
@@ -26,9 +26,9 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             Package if found, None otherwise
         """
-        return self.find_one({"name": name})
+        return await self.find_one({"name": name})
 
-    def find_by_registry(self, registry: str, skip: int = 0, limit: int = 100) -> List[Package]:
+    async def find_by_registry(self, registry: str, skip: int = 0, limit: int = 100) -> List[Package]:
         """
         Find packages by registry.
 
@@ -40,9 +40,9 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             List of packages
         """
-        return self.find_many({"registry": registry}, skip=skip, limit=limit)
+        return await self.find_many({"registry": registry}, skip=skip, limit=limit)
 
-    def find_by_owner(self, owner: str, skip: int = 0, limit: int = 100) -> List[Package]:
+    async def find_by_owner(self, owner: str, skip: int = 0, limit: int = 100) -> List[Package]:
         """
         Find packages by owner.
 
@@ -54,9 +54,9 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             List of packages
         """
-        return self.find_many({"owner": owner}, skip=skip, limit=limit)
+        return await self.find_many({"owner": owner}, skip=skip, limit=limit)
 
-    def find_high_risk(
+    async def find_high_risk(
         self, threshold: float = 70.0, skip: int = 0, limit: int = 100
     ) -> List[Package]:
         """
@@ -70,14 +70,14 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             List of high-risk packages
         """
-        return self.find_many(
+        return await self.find_many(
             {"risk_score": {"$gte": threshold}},
             skip=skip,
             limit=limit,
             sort=[("risk_score", -1)],
         )
 
-    def find_needs_scan(self, skip: int = 0, limit: int = 100) -> List[Package]:
+    async def find_needs_scan(self, skip: int = 0, limit: int = 100) -> List[Package]:
         """
         Find packages needing full scan.
 
@@ -88,7 +88,7 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             List of packages needing scan
         """
-        return self.find_many(
+        return await self.find_many(
             {
                 "$or": [
                     {"scan_state.deps_crawled": False},
@@ -100,7 +100,7 @@ class PackageRepository(BaseRepository[Package]):
             limit=limit,
         )
 
-    def search_by_name(self, search_term: str, skip: int = 0, limit: int = 100) -> List[Package]:
+    async def search_by_name(self, search_term: str, skip: int = 0, limit: int = 100) -> List[Package]:
         """
         Search packages by name (case-insensitive).
 
@@ -112,7 +112,7 @@ class PackageRepository(BaseRepository[Package]):
         Returns:
             List of matching packages
         """
-        return self.find_many(
+        return await self.find_many(
             {"name": {"$regex": search_term, "$options": "i"}},
             skip=skip,
             limit=limit,

@@ -2,11 +2,14 @@
 NPM Registry API client.
 """
 
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 import requests
+
+from services.priority_resource_manager import Priority, get_resource_manager
 
 
 @dataclass
@@ -34,27 +37,84 @@ class NpmPackageMetadata:
 
 
 class NpmRegistryClient:
-    """Client for interacting with npm registry API."""
+    """
+    Client for interacting with npm registry API (singleton).
+
+    This class implements the singleton pattern to ensure a single shared
+    instance with one requests.Session for optimal connection pooling.
+    All methods support priority-based resource management to ensure
+    user requests are never blocked by background jobs.
+    """
 
     BASE_URL = "https://registry.npmjs.org"
     TIMEOUT = 30
 
-    def __init__(self):
-        self._session = requests.Session()
-        self._session.headers.update(
-            {"Accept": "application/json", "User-Agent": "IntraceSentinel/1.0"}
-        )
+    _instance: Optional["NpmRegistryClient"] = None
 
-    def get_package_metadata(self, package_name: str) -> Optional[NpmPackageMetadata]:
+    def __new__(cls):
+        """Ensure only one instance exists (singleton pattern)."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        """Initialize the npm client (only runs once due to singleton)."""
+        # Only initialize once (singleton pattern)
+        if not hasattr(self, '_initialized'):
+            self._session = requests.Session()
+            self._session.headers.update(
+                {"Accept": "application/json", "User-Agent": "IntraceSentinel/1.0"}
+            )
+            self._resource_manager = get_resource_manager()
+            self._initialized = True
+
+    async def get_package_metadata(
+        self,
+        package_name: str,
+        priority: Priority = Priority.LOW
+    ) -> Optional[NpmPackageMetadata]:
         """
-        Fetch full package metadata.
+        Fetch full package metadata with priority-based resource management.
 
         Args:
             package_name: npm package name (supports scoped packages)
+            priority: Priority level (HIGH for user requests, LOW for background jobs)
 
         Returns:
             NpmPackageMetadata or None if not found
         """
+        async with self._resource_manager.acquire(priority):
+            return await asyncio.to_thread(
+                self._get_package_metadata_sync, package_name
+            )
+
+    async def get_version_metadata(
+        self,
+        package_name: str,
+        version: str,
+        priority: Priority = Priority.LOW
+    ) -> Optional[dict]:
+        """
+        Fetch version-specific metadata with priority-based resource management.
+
+        This fetches the /{package}/{version} endpoint which includes
+        dependencies, devDependencies, and other version-specific data.
+
+        Args:
+            package_name: npm package name (supports scoped packages)
+            version: Specific version to fetch
+            priority: Priority level (HIGH for user requests, LOW for background jobs)
+
+        Returns:
+            Raw version metadata dict or None if not found
+        """
+        async with self._resource_manager.acquire(priority):
+            return await asyncio.to_thread(
+                self._get_version_metadata_sync, package_name, version
+            )
+
+    def _get_package_metadata_sync(self, package_name: str) -> Optional[NpmPackageMetadata]:
+        """Synchronous implementation of get_package_metadata."""
         # Handle scoped packages (@scope/name)
         encoded_name = package_name.replace("/", "%2F")
         url = f"{self.BASE_URL}/{encoded_name}"
@@ -71,20 +131,41 @@ class NpmRegistryClient:
             print(f"[npm_client] ERROR: Failed to fetch package {package_name}: {e}")
             return None
 
-    def get_recent_versions(
-        self, package_name: str, since: datetime
+    def _get_version_metadata_sync(self, package_name: str, version: str) -> Optional[dict]:
+        """Synchronous implementation of get_version_metadata."""
+        # Handle scoped packages (@scope/name)
+        encoded_name = package_name.replace("/", "%2F")
+        url = f"{self.BASE_URL}/{encoded_name}/{version}"
+
+        try:
+            response = self._session.get(url, timeout=self.TIMEOUT)
+            if response.status_code == 404:
+                print(f"[npm_client] Version not found: {package_name}@{version}")
+                return None
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            print(f"[npm_client] ERROR: Failed to fetch version {package_name}@{version}: {e}")
+            return None
+
+    async def get_recent_versions(
+        self,
+        package_name: str,
+        since: datetime,
+        priority: Priority = Priority.LOW
     ) -> List[NpmVersionInfo]:
         """
-        Get versions published since a given time.
+        Get versions published since a given time with priority-based resource management.
 
         Args:
             package_name: npm package name
             since: Cutoff datetime (UTC)
+            priority: Priority level (HIGH for user requests, LOW for background jobs)
 
         Returns:
             List of versions published after 'since'
         """
-        metadata = self.get_package_metadata(package_name)
+        metadata = await self.get_package_metadata(package_name, priority)
         if not metadata:
             return []
 
@@ -97,16 +178,61 @@ class NpmRegistryClient:
         recent.sort(key=lambda v: v.publish_time)
         return recent
 
-    def download_tarball(self, tarball_url: str) -> Optional[bytes]:
+    async def get_latest_versions(
+        self,
+        package_name: str,
+        max_count: int = 5,
+        priority: Priority = Priority.LOW
+    ) -> List[NpmVersionInfo]:
         """
-        Download package tarball.
+        Get the N most recent versions of a package with priority-based resource management.
+
+        Args:
+            package_name: npm package name
+            max_count: Maximum number of versions to return (default 5)
+            priority: Priority level (HIGH for user requests, LOW for background jobs)
+
+        Returns:
+            List of most recent versions, sorted oldest to newest
+        """
+        metadata = await self.get_package_metadata(package_name, priority)
+        if not metadata:
+            return []
+
+        # Get all versions and sort by publish time descending (newest first)
+        all_versions = list(metadata.versions.values())
+        all_versions.sort(key=lambda v: v.publish_time, reverse=True)
+
+        # Take the N most recent
+        recent = all_versions[:max_count]
+
+        # Reverse to get chronological order (oldest to newest)
+        recent.reverse()
+
+        return recent
+
+    async def download_tarball(
+        self,
+        tarball_url: str,
+        priority: Priority = Priority.LOW
+    ) -> Optional[bytes]:
+        """
+        Download package tarball with priority-based resource management.
 
         Args:
             tarball_url: URL to the .tgz file
+            priority: Priority level (HIGH for user requests, LOW for background jobs)
 
         Returns:
             Raw tarball bytes or None
         """
+        async with self._resource_manager.acquire(priority):
+            return await asyncio.to_thread(
+                self._download_tarball_sync, tarball_url
+            )
+
+    def _download_tarball_sync(self, tarball_url: str) -> Optional[bytes]:
+        """Synchronous implementation of download_tarball."""
         try:
             response = self._session.get(tarball_url, timeout=60)
             response.raise_for_status()

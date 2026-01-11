@@ -17,7 +17,7 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
     def __init__(self, database: Database):
         super().__init__(database, "package_deltas", PackageDelta)
 
-    def find_by_package(
+    async def find_by_package(
         self, package_id: str | ObjectId, skip: int = 0, limit: int = 100
     ) -> List[PackageDelta]:
         """
@@ -34,14 +34,14 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         if isinstance(package_id, str):
             package_id = ObjectId(package_id)
 
-        return self.find_many(
+        return await self.find_many(
             {"package_id": package_id},
             skip=skip,
             limit=limit,
             sort=[("computed_at", -1)],
         )
 
-    def find_delta(
+    async def find_delta(
         self, package_id: str | ObjectId, from_version: str, to_version: str
     ) -> Optional[PackageDelta]:
         """
@@ -58,11 +58,11 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         if isinstance(package_id, str):
             package_id = ObjectId(package_id)
 
-        return self.find_one(
+        return await self.find_one(
             {"package_id": package_id, "from_version": from_version, "to_version": to_version}
         )
 
-    def find_with_install_scripts(
+    async def find_with_install_scripts(
         self, skip: int = 0, limit: int = 100
     ) -> List[PackageDelta]:
         """
@@ -75,14 +75,14 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         Returns:
             List of deltas with install script changes
         """
-        return self.find_many(
+        return await self.find_many(
             {"signals.touched_install_scripts": True},
             skip=skip,
             limit=limit,
             sort=[("computed_at", -1)],
         )
 
-    def find_with_network_calls(
+    async def find_with_network_calls(
         self, skip: int = 0, limit: int = 100
     ) -> List[PackageDelta]:
         """
@@ -95,14 +95,14 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         Returns:
             List of deltas with network calls added
         """
-        return self.find_many(
+        return await self.find_many(
             {"signals.added_network_calls": True},
             skip=skip,
             limit=limit,
             sort=[("computed_at", -1)],
         )
 
-    def find_obfuscated(
+    async def find_obfuscated(
         self, skip: int = 0, limit: int = 100
     ) -> List[PackageDelta]:
         """
@@ -115,14 +115,14 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         Returns:
             List of deltas with obfuscated code
         """
-        return self.find_many(
+        return await self.find_many(
             {"signals.minified_or_obfuscated_delta": True},
             skip=skip,
             limit=limit,
             sort=[("computed_at", -1)],
         )
 
-    def find_high_risk(
+    async def find_high_risk(
         self, threshold: float = 70.0, skip: int = 0, limit: int = 100
     ) -> List[PackageDelta]:
         """
@@ -136,7 +136,7 @@ class PackageDeltaRepository(BaseRepository[PackageDelta]):
         Returns:
             List of high-risk deltas sorted by risk score
         """
-        return self.find_many(
+        return await self.find_many(
             {"risk_score": {"$gte": threshold}},
             skip=skip,
             limit=limit,
